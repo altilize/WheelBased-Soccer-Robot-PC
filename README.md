@@ -1,92 +1,133 @@
-# R2CWarrioratomic
+# Wheel-Based Soccer Robot: PC Vision and Strategy
 
+C++/OpenCV program for a KRSBI Beroda soccer robot: dual-camera vision, game behaviors, STM32 serial link and basestation UDP.
 
+<!-- TODO: add demo GIF/photo -->
 
-## Getting started
+## Overview
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+This is the high-level controller of R2C's wheeled soccer robot (codename *Warrior*) for **KRSBI-B** (Kontes Robot Sepak Bola Indonesia Beroda). An onboard Linux PC reads two USB cameras, detects the ball, goal, teammates and opponents, decides what the robot should do, and sends motion commands to the STM32 motion controller ([WheelBased-Soccer-Robot-Microcontroller](https://github.com/altilize/WheelBased-Soccer-Robot-Microcontroller)). A basestation on the team network selects skills and can drive the robot manually over UDP multicast.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Features
 
-## Add your files
+- **Dual-camera vision** (640x480, V4L2)
+  - Omnidirectional camera: frame shift, circular mask and rotation to align with the robot heading, then HSV segmentation of field, ball, teammates and opponents. Field boundary from a convex hull.
+  - Front camera: goal, teammate and opponent detection, plus a 64-ray scan for dark obstacles.
+- **Ball tracking**: contour plus `minEnclosingCircle` detection, scalar Kalman filters on ball, teammate, opponent and goal coordinates, and a ball direction predictor used to compute an intercept heading.
+- **Behaviors** selected from the basestation: chase ball, shoot at goal, pass to teammate, track stationary or moving ball, fast chase, soft and hard kick.
+- **Goalkeeper entrance**: autonomous field entry by driving through grid waypoints (0,2) → (8,2) → (8,0), then idle and left/right guarding.
+- **Grid navigation**: move to a field grid cell using odometry from the STM32, with far/near speed profiles.
+- **PID heading control** with integral anti-windup for aiming at the ball.
+- **Manual override** from the basestation (forward, back, left, right, rotate, stop).
+- **Logging** of grid position, compass and state transitions to dated files in `logging/`.
+- **GTK calibration tools** for camera parameters (`kamera`) and HSV thresholds (`segmentasi`).
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+## Architecture
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/ferepender7/r2cwarrioratomic.git
-git branch -M main
-git push -uf origin main
+ Omni camera --+
+               |   thread_citra: segmentation, detection, behaviors
+ Front camera -+-----------------------------+
+                                             v
+                                        pcData (motion cmd)
+                                             |
+ Basestation <--UDP multicast--> receive/send threads
+ (skills, manual,  224.16.32.110:12478       |
+  grid reset)                                v
+                              thread_komunikasi: USB serial 115200
+                                             |
+                                             v
+                         STM32 --> holonomic kinematics --> 4 omni-wheel motors
+                           |
+                           '--> compass, grid, X/Y, IR, keypad back to PC
 ```
 
-## Integrate with your tools
+The program runs four POSIX threads:
 
-- [ ] [Set up project integrations](https://gitlab.com/ferepender7/r2cwarrioratomic/-/settings/integrations)
+| Thread | Role |
+| --- | --- |
+| `thread_citra` | Grab frames from both cameras, run vision and behavior logic, fill the outgoing command |
+| `thread_komunikasi` | Send the 13-byte command to the STM32 on `/dev/ttyACM0` and parse the 16-byte status reply |
+| `receiveBasestation` | Join the multicast group and decode skill, manual and grid/compass reset packets |
+| `sendBasestation` | Broadcast compass, X/Y position, ball angle, kick readiness and active skill every 50 ms |
 
-## Collaborate with your team
+### STM32 link
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+Commands carry a motion enable flag, 16-bit speed, signed heading (0° forward, 90° right), signed 16-bit rotation `vz`, handler and kick fields. A second packet type sets the grid cell and compass offset. Every packet ends with a checksum (bitwise NOT of the byte sum). The STM32 converts speed and heading into holonomic wheel speeds:
 
-## Test and Deploy
+```
+vx = speed * sin(heading)
+vy = speed * cos(heading)
+```
 
-Use the built-in continuous integration in GitLab.
+## Hardware and Software Stack
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+| Item | Details |
+| --- | --- |
+| Platform | Linux PC on the robot |
+| Cameras | 2x USB UVC webcams, addressed by `/dev/v4l/by-id/` path |
+| Motion controller | STM32F407 over USB CDC serial |
+| Language | C++14 / C++17 (GUI library) |
+| Libraries | OpenCV 4, gtkmm-3.0, pthreads |
+| Build | CMake ≥ 3.21 |
+| Tools | `v4l2-ctl` (v4l-utils) for camera parameters |
 
-***
+## Repository Structure
 
-# Editing this README
+```
+├── main.cpp                 # entry point, threads, behavior state machine, logging
+├── kamera.cpp               # GTK tool: choose a camera and tune/save V4L2 parameters
+├── segmentasi.cpp           # GTK tool: HSV threshold calibration on live or saved frames
+├── CMakeLists.txt
+├── library/
+│   ├── Citra.*              # image processing and object detection
+│   ├── Algoritma.*          # behaviors (chase, pass, shoot, catch) and PID
+│   ├── Motion.*             # grid navigation, rotation, obstacle avoidance helpers
+│   ├── Camera.*             # camera discovery and V4L2 parameter load/save
+│   ├── KomunikasiMikro.*    # STM32 packet encode/decode
+│   ├── InisiasiSerial.*     # termios serial setup
+│   ├── UDPListen.* UDPSend.*# basestation multicast
+│   ├── TypeData.h           # shared structs (pcData, STM32Data, BasestationData)
+│   └── BackCamera.h, StrikerCamera.h  # per-robot camera paths and omni frame offsets
+├── gui/                     # GTK widgets and Glade layouts for the calibration tools
+├── ui/                      # Glade layouts
+├── kalibrasi/               # HSV threshold files read at startup, legacy calibration utilities
+├── datacamera/              # saved V4L2 parameters per camera
+├── data/                    # sample frames for offline segmentation
+├── logging/                 # runtime logs (ignored by git)
+└── setcam.sh                # apply V4L2 settings for a given /dev/videoN
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## Build and Run
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+Dependencies (Ubuntu):
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+sudo apt install build-essential cmake pkg-config libopencv-dev libgtkmm-3.0-dev v4l-utils
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Build out of source:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Run from the repository root, because calibration files are loaded from relative paths (`kalibrasi/`, `datacamera/`, `logging/`):
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```bash
+./setcam.sh 0              # optional: apply camera settings to /dev/video0
+./build/kamera             # tune and save camera parameters
+./build/segmentasi         # calibrate HSV thresholds
+./build/main               # run the robot
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Before running `main`:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+- Set the camera paths in `library/BackCamera.h` to match your `/dev/v4l/by-id/` devices.
+- Connect the STM32 on `/dev/ttyACM0` and make sure your user is in the `dialout` group.
+- The basestation must be on the same network and use multicast group `224.16.32.110`, port `12478`.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+## My Role
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+This is shared R2C team code. My part (Moses Jaguar Ersaptiarso) focused on motion and integration: the STM32 serial protocol and PC to microcontroller data flow, grid navigation and the goalkeeper entrance sequence, sensor data integration (compass, odometry grid, IR, ToF flag), and runtime logging.

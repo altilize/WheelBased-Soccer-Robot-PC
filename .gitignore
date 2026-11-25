@@ -1,0 +1,29 @@
+# CMake build output
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeScripts/
+compile_commands.json
+/Makefile
+/gui/Makefile
+
+# Compiled binaries and objects
+*.o
+*.a
+*.so
+*.out
+/main
+/kamera
+/segmentasi
+kalibrasi/kamera/kalibrasi_kamera
+kalibrasi/encoder/kalibrasiencoder
+
+# Runtime logs
+logging/*.txt
+
+# IDE / editor
+.vscode/
+.idea/
+.theia/
+*.swp
